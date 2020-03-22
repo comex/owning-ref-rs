@@ -1,4 +1,5 @@
 #![warn(missing_docs)]
+#![allow(unused_parens, unused_imports)]
 
 /*!
 # An owning reference.
@@ -243,8 +244,8 @@ fn main() {
 ```
 */
 
-extern crate stable_deref_trait;
-pub use stable_deref_trait::{StableDeref as StableAddress, CloneStableDeref as CloneStableAddress};
+extern crate comex_stable_deref_trait as stable_deref_trait;
+pub use stable_deref_trait::{StableDeref as StableAddress, CloneStableDeref as CloneStableAddress, BubbleWrap, noop_bubble_wrap, BubbleWrapped};
 
 /// An owning reference.
 ///
@@ -255,8 +256,8 @@ pub use stable_deref_trait::{StableDeref as StableAddress, CloneStableDeref as C
 /// The owner is usually a pointer that points at some base type.
 ///
 /// For more details and examples, see the module and method docs.
-pub struct OwningRef<O, T: ?Sized> {
-    owner: O,
+pub struct OwningRef<O: StableAddress, T: ?Sized> {
+    owner: BubbleWrapped<O>,
     reference: *const T,
 }
 
@@ -269,8 +270,8 @@ pub struct OwningRef<O, T: ?Sized> {
 /// The owner is usually a pointer that points at some base type.
 ///
 /// For more details and examples, see the module and method docs.
-pub struct OwningRefMut<O, T: ?Sized> {
-    owner: O,
+pub struct OwningRefMut<O: StableAddress, T: ?Sized> {
+    owner: BubbleWrapped<O>,
     reference: *mut T,
 }
 
@@ -294,7 +295,7 @@ pub unsafe trait IntoErased<'a> {
 // OwningRef
 /////////////////////////////////////////////////////////////////////////////
 
-impl<O, T: ?Sized> OwningRef<O, T> {
+impl<O, T: ?Sized> OwningRef<O, T> where O: StableAddress {
     /// Creates a new owning reference from a owner
     /// initialized to the direct dereference of it.
     ///
@@ -314,10 +315,11 @@ impl<O, T: ?Sized> OwningRef<O, T> {
     {
         OwningRef {
             reference: &*o,
-            owner: o,
+            owner: BubbleWrapped::new(o),
         }
     }
 
+/*
     /// Like `new`, but doesn’t require `O` to implement the `StableAddress` trait.
     /// Instead, the caller is responsible to make the same promises as implementing the trait.
     ///
@@ -331,6 +333,7 @@ impl<O, T: ?Sized> OwningRef<O, T> {
             owner: o,
         }
     }
+    */
 
     /// Converts `self` into a new owning reference that points at something reachable
     /// from the previous one.
@@ -471,7 +474,7 @@ impl<O, T: ?Sized> OwningRef<O, T> {
     {
         OwningRef {
             reference: self.reference,
-            owner: f(self.owner),
+            owner: BubbleWrapped::new(f(self.owner.unwrap())),
         }
     }
 
@@ -483,7 +486,7 @@ impl<O, T: ?Sized> OwningRef<O, T> {
     pub fn map_owner_box(self) -> OwningRef<Box<O>, T> {
         OwningRef {
             reference: self.reference,
-            owner: Box::new(self.owner),
+            owner: BubbleWrapped::new(Box::new(self.owner.unwrap())),
         }
     }
 
@@ -521,10 +524,11 @@ impl<O, T: ?Sized> OwningRef<O, T> {
     /// ```
     pub fn erase_owner<'a>(self) -> OwningRef<O::Erased, T>
         where O: IntoErased<'a>,
+              O::Erased: StableAddress
     {
         OwningRef {
             reference: self.reference,
-            owner: self.owner.into_erased(),
+            owner: BubbleWrapped::new(self.owner.unwrap().into_erased()),
         }
     }
 
@@ -537,11 +541,25 @@ impl<O, T: ?Sized> OwningRef<O, T> {
 
     /// Discards the reference and retrieves the owner.
     pub fn into_owner(self) -> O {
-        self.owner
+        self.owner.unwrap()
+    }
+
+    pub fn replace_plus<'z, R, E>(
+        &'z mut self,
+        f: impl for<'a> FnOnce(MutToShared<'a, O>) -> (&'a T, Result<&'a R, E>)
+    ) -> Result<&'z R, E>
+    {
+        let mut bomb = AbortOnPanicBomb::new();
+        let (new_reference, plus) = f(unsafe {
+            MutToShared::new(&mut *self.owner)
+        });
+        self.reference = new_reference as *const T;
+        bomb.defuse();
+        plus
     }
 }
 
-impl<O, T: ?Sized> OwningRefMut<O, T> {
+impl<O, T: ?Sized> OwningRefMut<O, T> where O: StableAddress {
     /// Creates a new owning reference from a owner
     /// initialized to the direct dereference of it.
     ///
@@ -561,10 +579,11 @@ impl<O, T: ?Sized> OwningRefMut<O, T> {
     {
         OwningRefMut {
             reference: &mut *o,
-            owner: o,
+            owner: BubbleWrapped::new(o),
         }
     }
 
+/*
     /// Like `new`, but doesn’t require `O` to implement the `StableAddress` trait.
     /// Instead, the caller is responsible to make the same promises as implementing the trait.
     ///
@@ -578,6 +597,7 @@ impl<O, T: ?Sized> OwningRefMut<O, T> {
             owner: o,
         }
     }
+    */
 
     /// Converts `self` into a new _shared_ owning reference that points at
     /// something reachable from the previous one.
@@ -715,7 +735,7 @@ impl<O, T: ?Sized> OwningRefMut<O, T> {
     {
         OwningRefMut {
             reference: self.reference,
-            owner: f(self.owner),
+            owner: BubbleWrapped::new(f(self.owner.unwrap())),
         }
     }
 
@@ -727,7 +747,7 @@ impl<O, T: ?Sized> OwningRefMut<O, T> {
     pub fn map_owner_box(self) -> OwningRefMut<Box<O>, T> {
         OwningRefMut {
             reference: self.reference,
-            owner: Box::new(self.owner),
+            owner: BubbleWrapped::new(Box::new(self.owner.unwrap())),
         }
     }
 
@@ -765,28 +785,19 @@ impl<O, T: ?Sized> OwningRefMut<O, T> {
     /// ```
     pub fn erase_owner<'a>(self) -> OwningRefMut<O::Erased, T>
         where O: IntoErased<'a>,
+              O::Erased: StableAddress
     {
         OwningRefMut {
             reference: self.reference,
-            owner: self.owner.into_erased(),
+            owner: BubbleWrapped::new(self.owner.unwrap().into_erased()),
         }
     }
 
     // TODO: wrap_owner
 
-    /// A reference to the underlying owner.
-    pub fn as_owner(&self) -> &O {
-        &self.owner
-    }
-
-    /// A mutable reference to the underlying owner.
-    pub fn as_owner_mut(&mut self) -> &mut O {
-        &mut self.owner
-    }
-
     /// Discards the reference and retrieves the owner.
     pub fn into_owner(self) -> O {
-        self.owner
+        self.owner.unwrap()
     }
 }
 
@@ -829,6 +840,12 @@ impl<O, H> Deref for OwningHandle<O, H>
     fn deref(&self) -> &H::Target {
         self.handle.deref()
     }
+}
+
+unsafe impl<O, H> BubbleWrap for OwningHandle<O, H>
+    where O: StableAddress, H: StableAddress,
+{
+    noop_bubble_wrap!();
 }
 
 unsafe impl<O, H> StableAddress for OwningHandle<O, H>
@@ -944,7 +961,7 @@ use std::cmp::{Eq, PartialEq, Ord, PartialOrd, Ordering};
 use std::hash::{Hash, Hasher};
 use std::borrow::Borrow;
 
-impl<O, T: ?Sized> Deref for OwningRef<O, T> {
+impl<O, T: ?Sized> Deref for OwningRef<O, T> where O: StableAddress {
     type Target = T;
 
     fn deref(&self) -> &T {
@@ -954,7 +971,7 @@ impl<O, T: ?Sized> Deref for OwningRef<O, T> {
     }
 }
 
-impl<O, T: ?Sized> Deref for OwningRefMut<O, T> {
+impl<O, T: ?Sized> Deref for OwningRefMut<O, T> where O: StableAddress {
     type Target = T;
 
     fn deref(&self) -> &T {
@@ -964,7 +981,7 @@ impl<O, T: ?Sized> Deref for OwningRefMut<O, T> {
     }
 }
 
-impl<O, T: ?Sized> DerefMut for OwningRefMut<O, T> {
+impl<O, T: ?Sized> DerefMut for OwningRefMut<O, T> where O: StableAddress {
     fn deref_mut(&mut self) -> &mut T {
         unsafe {
             &mut *self.reference
@@ -972,29 +989,37 @@ impl<O, T: ?Sized> DerefMut for OwningRefMut<O, T> {
     }
 }
 
-unsafe impl<O, T: ?Sized> StableAddress for OwningRef<O, T> {}
+unsafe impl<O, T: ?Sized> BubbleWrap for OwningRef<O, T> where O: StableAddress {
+    noop_bubble_wrap!();
+}
 
-unsafe impl<O, T: ?Sized> StableAddress for OwningRefMut<O, T> {}
+unsafe impl<O, T: ?Sized> StableAddress for OwningRef<O, T> where O: StableAddress {}
 
-impl<O, T: ?Sized> AsRef<T> for OwningRef<O, T> {
+unsafe impl<O, T: ?Sized> BubbleWrap for OwningRefMut<O, T> where O: StableAddress {
+    noop_bubble_wrap!();
+}
+
+unsafe impl<O, T: ?Sized> StableAddress for OwningRefMut<O, T> where O: StableAddress {}
+
+impl<O, T: ?Sized> AsRef<T> for OwningRef<O, T> where O: StableAddress {
     fn as_ref(&self) -> &T {
         &*self
     }
 }
 
-impl<O, T: ?Sized> AsRef<T> for OwningRefMut<O, T> {
+impl<O, T: ?Sized> AsRef<T> for OwningRefMut<O, T> where O: StableAddress {
     fn as_ref(&self) -> &T {
         &*self
     }
 }
 
-impl<O, T: ?Sized> AsMut<T> for OwningRefMut<O, T> {
+impl<O, T: ?Sized> AsMut<T> for OwningRefMut<O, T> where O: StableAddress {
     fn as_mut(&mut self) -> &mut T {
         &mut *self
     }
 }
 
-impl<O, T: ?Sized> Borrow<T> for OwningRef<O, T> {
+impl<O, T: ?Sized> Borrow<T> for OwningRef<O, T> where O: StableAddress {
     fn borrow(&self) -> &T {
         &*self
     }
@@ -1033,7 +1058,7 @@ impl<O, T: ?Sized> From<OwningRefMut<O, T>> for OwningRef<O, T>
 // ^ FIXME: Is a Into impl for calling into_owner() possible as well?
 
 impl<O, T: ?Sized> Debug for OwningRef<O, T>
-    where O: Debug,
+    where O: Debug + StableAddress,
           T: Debug,
 {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
@@ -1045,13 +1070,12 @@ impl<O, T: ?Sized> Debug for OwningRef<O, T>
 }
 
 impl<O, T: ?Sized> Debug for OwningRefMut<O, T>
-    where O: Debug,
+    where O: Debug + StableAddress,
           T: Debug,
 {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         write!(f,
-               "OwningRefMut {{ owner: {:?}, reference: {:?} }}",
-               self.as_owner(),
+               "OwningRefMut {{ owner: ?, reference: {:?} }}",
                &**self)
     }
 }
@@ -1061,7 +1085,7 @@ impl<O, T: ?Sized> Clone for OwningRef<O, T>
 {
     fn clone(&self) -> Self {
         OwningRef {
-            owner: self.owner.clone(),
+            owner: BubbleWrapped::new(self.owner.clone()),
             reference: self.reference,
         }
     }
@@ -1071,14 +1095,14 @@ unsafe impl<O, T: ?Sized> CloneStableAddress for OwningRef<O, T>
     where O: CloneStableAddress {}
 
 unsafe impl<O, T: ?Sized> Send for OwningRef<O, T>
-    where O: Send, for<'a> (&'a T): Send {}
+    where O: Send, for<'a> (&'a T): Send, O: StableAddress {}
 unsafe impl<O, T: ?Sized> Sync for OwningRef<O, T>
-    where O: Sync, for<'a> (&'a T): Sync {}
+    where O: Sync, for<'a> (&'a T): Sync, O: StableAddress {}
 
 unsafe impl<O, T: ?Sized> Send for OwningRefMut<O, T>
-    where O: Send, for<'a> (&'a mut T): Send {}
+    where O: Send, for<'a> (&'a mut T): Send, O: StableAddress {}
 unsafe impl<O, T: ?Sized> Sync for OwningRefMut<O, T>
-    where O: Sync, for<'a> (&'a mut T): Sync {}
+    where O: Sync, for<'a> (&'a mut T): Sync, O: StableAddress {}
 
 impl Debug for dyn Erased {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
@@ -1086,53 +1110,53 @@ impl Debug for dyn Erased {
     }
 }
 
-impl<O, T: ?Sized> PartialEq for OwningRef<O, T> where T: PartialEq {
+impl<O, T: ?Sized> PartialEq for OwningRef<O, T> where T: PartialEq, O: StableAddress {
     fn eq(&self, other: &Self) -> bool {
         (&*self as &T).eq(&*other as &T)
      }
 }
 
-impl<O, T: ?Sized> Eq for OwningRef<O, T> where T: Eq {}
+impl<O, T: ?Sized> Eq for OwningRef<O, T> where T: Eq, O: StableAddress {}
 
-impl<O, T: ?Sized> PartialOrd for OwningRef<O, T> where T: PartialOrd {
+impl<O, T: ?Sized> PartialOrd for OwningRef<O, T> where T: PartialOrd, O: StableAddress {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         (&*self as &T).partial_cmp(&*other as &T)
     }
 }
 
-impl<O, T: ?Sized> Ord for OwningRef<O, T> where T: Ord {
+impl<O, T: ?Sized> Ord for OwningRef<O, T> where T: Ord, O: StableAddress {
     fn cmp(&self, other: &Self) -> Ordering {
         (&*self as &T).cmp(&*other as &T)
     }
 }
 
-impl<O, T: ?Sized> Hash for OwningRef<O, T> where T: Hash {
+impl<O, T: ?Sized> Hash for OwningRef<O, T> where T: Hash, O: StableAddress {
     fn hash<H: Hasher>(&self, state: &mut H) {
         (&*self as &T).hash(state);
     }
 }
 
-impl<O, T: ?Sized> PartialEq for OwningRefMut<O, T> where T: PartialEq {
+impl<O, T: ?Sized> PartialEq for OwningRefMut<O, T> where T: PartialEq, O: StableAddress {
     fn eq(&self, other: &Self) -> bool {
         (&*self as &T).eq(&*other as &T)
      }
 }
 
-impl<O, T: ?Sized> Eq for OwningRefMut<O, T> where T: Eq {}
+impl<O, T: ?Sized> Eq for OwningRefMut<O, T> where T: Eq, O: StableAddress {}
 
-impl<O, T: ?Sized> PartialOrd for OwningRefMut<O, T> where T: PartialOrd {
+impl<O, T: ?Sized> PartialOrd for OwningRefMut<O, T> where T: PartialOrd, O: StableAddress {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         (&*self as &T).partial_cmp(&*other as &T)
     }
 }
 
-impl<O, T: ?Sized> Ord for OwningRefMut<O, T> where T: Ord {
+impl<O, T: ?Sized> Ord for OwningRefMut<O, T> where T: Ord, O: StableAddress {
     fn cmp(&self, other: &Self) -> Ordering {
         (&*self as &T).cmp(&*other as &T)
     }
 }
 
-impl<O, T: ?Sized> Hash for OwningRefMut<O, T> where T: Hash {
+impl<O, T: ?Sized> Hash for OwningRefMut<O, T> where T: Hash, O: StableAddress {
     fn hash<H: Hasher>(&self, state: &mut H) {
         (&*self as &T).hash(state);
     }
@@ -1227,6 +1251,41 @@ pub type ErasedArcRef<U> = OwningRef<Arc<dyn Erased>, U>;
 
 /// Typedef of a mutable owning reference that uses an erased `Box` as the owner.
 pub type ErasedBoxRefMut<U> = OwningRefMut<Box<dyn Erased>, U>;
+
+struct AbortOnPanicBomb { active: bool }
+impl AbortOnPanicBomb {
+    #[inline(always)]
+    fn new() -> Self {
+        AbortOnPanicBomb { active: true }
+    }
+    #[inline(always)]
+    fn defuse(&mut self) {
+        self.active = false;
+    }
+}
+impl Drop for AbortOnPanicBomb {
+    fn drop(&mut self) {
+        if self.active { std::process::abort(); }
+    }
+}
+
+pub struct MutToShared<'a, T>(*mut T, std::marker::PhantomData<&'a T>);
+impl<'a, T> Deref for MutToShared<'a, T> {
+    type Target = T;
+    fn deref(&self) -> &T { unsafe { &*self.0 } }
+}
+impl<'a, T> DerefMut for MutToShared<'a, T> {
+    fn deref_mut(&mut self) -> &mut T { unsafe { &mut *self.0 } }
+}
+impl<'a, T> MutToShared<'a, T> {
+    pub unsafe fn new(t: *mut T) -> Self {
+        MutToShared(t, std::marker::PhantomData)
+    }
+    pub fn into_shared(self) -> &'a T {
+        unsafe { &*self.0 }
+    }
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -1768,6 +1827,7 @@ mod tests {
             assert!(or.is_err());
         }
 
+/* unsound
         #[test]
         fn as_owner() {
             let or: BoxRefMut<String> = Box::new(example().1).into();
@@ -1775,6 +1835,7 @@ mod tests {
             assert_eq!(&*or, "hello");
             assert_eq!(&**or.as_owner(), "hello world");
         }
+    */
 
         #[test]
         fn into_owner() {
@@ -1791,7 +1852,7 @@ mod tests {
             let or = or.map_mut(|x| &mut x[..5]);
             let s = format!("{:?}", or);
             assert_eq!(&s,
-                       "OwningRefMut { owner: \"hello world\", reference: \"hello\" }");
+                       "OwningRefMut { owner: ?, reference: \"hello\" }");
         }
 
         #[test]
