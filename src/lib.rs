@@ -554,8 +554,8 @@ impl<O, T: ?Sized> OwningRef<O, T> where O: StableAddress {
         )
     }
     #[inline]
-    pub fn modify_noret<'z, F>(&'z mut self, f: F)
-        where for<'_mut, 'shared> F: FnOnce(&'_mut mut &'shared T)
+    pub fn modify_noret<'z, F, R>(&'z mut self, f: F) -> R
+        where for<'_mut, 'shared> F: FnOnce(&'_mut mut &'shared T) -> R
     {
         f(
             unsafe { &mut *(&mut self.reference as *mut _ as *mut _) }
@@ -574,8 +574,8 @@ impl<O, T: ?Sized> OwningRef<O, T> where O: StableAddress {
     // you can do this with the regular version too, but this doesn't require typed_closure! and
     // works on stable
     #[inline]
-    pub fn modify_with_owner_noret<'z, F>(&'z mut self, f: F)
-        where for<'a, 'b> F: FnOnce(&'a O, &'b mut &'a T)
+    pub fn modify_with_owner_noret<'z, F, R>(&'z mut self, f: F) -> R
+        where for<'a, 'b> F: FnOnce(&'a O, &'b mut &'a T) -> R
     {
         f(
             &*self.owner,
@@ -2175,10 +2175,12 @@ mod tests {
                 |_o: &Box<i32>, t: &mut &i32| -> () {
                     *t = &100;
                 });
-            or.modify_with_owner(typed_closure!((for<'a, 'b> FnOnce(&'a Box<i32>, &'b mut &'a i32) -> ()),
-                |_o: &Box<i32>, t: &mut &i32| -> () {
+            let q = or.modify_with_owner(typed_closure!((for<'a, 'b> FnOnce(&'a Box<i32>, &'b mut &'a i32) -> &'a i32),
+                |_o: &Box<i32>, t: &mut &i32| -> &i32 {
                     *t = &100;
+                    *t
                 }));
+            assert_eq!(*q, 100);
             assert_eq!(*or, 100);
         }
         #[test]
