@@ -597,6 +597,19 @@ impl<O, T: ?Sized> OwningRef<O, T> where O: StableAddress {
             r
         }
     }
+    #[inline]
+    pub fn replace_noret<'z, F>(&'z mut self, f: F)
+        where for<'_mut, 'shared> F: FnOnce(MutToShared<'_mut, 'shared, O>) -> &'shared T
+    {
+        unsafe {
+            let mut bomb = AbortOnPanicBomb::new();
+            let mut owner = std::ptr::read(&mut self.owner).unwrap();
+            let reference = f(MutToShared::new(&mut owner));
+            std::ptr::write(&mut self.owner, BubbleWrapped::new(owner));
+            self.reference = reference;
+            bomb.defuse();
+        }
+    }
 }
 
 pub trait ReplaceFn<'shared, O: ?Sized, T: ?Sized + 'shared> {
