@@ -1,5 +1,6 @@
-#![warn(missing_docs)]
+//#![warn(missing_docs)]
 #![allow(unused_parens, unused_imports)]
+#![feature(unboxed_closures, associated_type_bounds)]
 
 /*!
 # An owning reference.
@@ -544,21 +545,75 @@ impl<O, T: ?Sized> OwningRef<O, T> where O: StableAddress {
         self.owner.unwrap()
     }
 
-    pub fn replace_plus<'z, R, E>(
-        &'z mut self,
-        f: impl for<'a> FnOnce(MutToShared<'a, O>) -> (&'a T, Result<&'a R, E>)
-    ) -> Result<&'z R, E>
+    #[inline]
+    pub fn modify_with_owner<'z, F>(&'z mut self, f: F)
+        -> <F as FnOnce<(&'z O, &'z mut &'z T)>>::Output
+        where for<'a, 'b> F: FnOnce<(&'a O, &'b mut &'a T)>
     {
-        let mut bomb = AbortOnPanicBomb::new();
-        let (new_reference, plus) = f(unsafe {
-            MutToShared::new(&mut *self.owner)
-        });
-        self.reference = new_reference as *const T;
-        bomb.defuse();
-        plus
+        f(
+            &*self.owner,
+            unsafe { &mut *(&mut self.reference as *mut _ as *mut _) }
+        )
+    }
+    // you can do this with the regular version too, but this doesn't require typed_closure! and
+    // works on stable
+    #[inline]
+    pub fn modify_with_owner_noret<'z, F>(&'z mut self, f: F)
+        where for<'a, 'b> F: FnOnce(&'a O, &'b mut &'a T)
+    {
+        f(
+            &*self.owner,
+            unsafe { &mut *(&mut self.reference as *mut _ as *mut _) }
+        )
+    }
+    #[inline]
+    pub fn replace<'z, F>(&'z mut self, f: F)
+        -> <F as ReplaceFn<'z, O, T>>::ROutput
+        where for<'shared> F: ReplaceFn<'shared, O, T>
+    {
+        unsafe {
+            let mut bomb = AbortOnPanicBomb::new();
+            let mut owner = std::ptr::read(&mut self.owner).unwrap();
+            let (reference, r) = f.replace_fn_call(MutToShared::new(&mut owner));
+            std::ptr::write(&mut self.owner, BubbleWrapped::new(owner));
+            self.reference = reference;
+            bomb.defuse();
+            r
+        }
     }
 }
 
+pub trait ReplaceFn<'shared, O: ?Sized + 'shared, T: ?Sized + 'shared> {
+    type ROutput;
+    fn replace_fn_call<'_mut>(self, mts: MutToShared<'_mut, 'shared, O>) -> (&'shared T, Self::ROutput);
+}
+impl<'shared, O: ?Sized + 'shared, T: ?Sized + 'shared, F, R> ReplaceFn<'shared, O, T> for F
+    where F: for<'_mut> FnOnce(MutToShared<'_mut, 'shared, O>) -> (&'shared T, R),
+          R: 'shared
+{
+    type ROutput = R;
+    fn replace_fn_call<'_mut>(self, mts: MutToShared<'_mut, 'shared, O>) -> (&'shared T, Self::ROutput) {
+        self(mts)
+    }
+}
+/*
+impl<'_mut, 'shared: '_mut, O: ?Sized + 'shared, T: ?Sized + 'shared, F> ReplaceFn<'_mut, 'shared, O, T> for F
+    where F: FnOnce<(MutToShared<'_mut, 'shared, O>,)>,
+{
+    type ROutput = ();
+    fn replace_fn_call(self, mts: MutToShared<'_mut, 'shared, O>) -> (&'shared T, Self::ROutput) {
+        panic!()
+    }
+}
+*/
+
+/*
+fn huh(f: impl for<'_mut, 'shared> FnOnce(MutToShared<'_mut, 'shared, Box<i32>>) -> (&'shared i32, &'shared i32))
+    -> impl for<'_mut, 'shared> ReplaceFn<'_mut, 'shared, Box<i32>, &'shared i32> {
+    f
+}
+
+*/
 impl<O, T: ?Sized> OwningRefMut<O, T> where O: StableAddress {
     /// Creates a new owning reference from a owner
     /// initialized to the direct dereference of it.
@@ -1269,23 +1324,33 @@ impl Drop for AbortOnPanicBomb {
     }
 }
 
-pub struct MutToShared<'a, T>(*mut T, std::marker::PhantomData<&'a T>);
-impl<'a, T> Deref for MutToShared<'a, T> {
+pub struct MutToShared<'_mut, 'shared, T: ?Sized>(*mut T, std::marker::PhantomData<(&'_mut mut T, &'shared T)>);
+impl<'_mut, 'shared, T: ?Sized> Deref for MutToShared<'_mut, 'shared, T> {
     type Target = T;
     fn deref(&self) -> &T { unsafe { &*self.0 } }
 }
-impl<'a, T> DerefMut for MutToShared<'a, T> {
+impl<'_mut, 'shared, T: ?Sized> DerefMut for MutToShared<'_mut, 'shared, T> {
     fn deref_mut(&mut self) -> &mut T { unsafe { &mut *self.0 } }
 }
-impl<'a, T> MutToShared<'a, T> {
+impl<'_mut, 'shared, T: ?Sized> MutToShared<'_mut, 'shared, T> {
     pub unsafe fn new(t: *mut T) -> Self {
         MutToShared(t, std::marker::PhantomData)
     }
-    pub fn into_shared(self) -> &'a T {
+    pub fn into_shared(self) -> &'shared T {
         unsafe { &*self.0 }
+    }
+    pub fn map<U>(mut self, f: impl FnOnce(&mut T) -> &mut U) -> MutToShared<'_mut, 'shared, U> {
+        unsafe { MutToShared::new(f(&mut self)) }
     }
 }
 
+#[macro_export]
+macro_rules! typed_closure {
+    (($($bound:tt)*), $closure:expr) => { {
+        fn _typed_closure_id<T>(t: T) -> T where T: $($bound)* { t }
+        _typed_closure_id($closure)
+    } }
+}
 
 #[cfg(test)]
 mod tests {
@@ -2072,6 +2137,48 @@ mod tests {
             assert_eq!(*d, 44);
             *d = 45;
             assert_eq!(*d, 45);
+        }
+    }
+
+    mod plus {
+        use super::super::{BoxRef, MutToShared};
+        #[test]
+        fn modify_with_owner() {
+            let mut or: BoxRef<i32> = Box::new(42).into();
+            or.modify_with_owner_noret(
+                |_o: &Box<i32>, t: &mut &i32| -> () {
+                    *t = &100;
+                });
+            or.modify_with_owner(typed_closure!((for<'a, 'b> FnOnce(&'a Box<i32>, &'b mut &'a i32) -> ()),
+                |_o: &Box<i32>, t: &mut &i32| -> () {
+                    *t = &100;
+                }));
+            assert_eq!(*or, 100);
+        }
+        #[test]
+        fn replace() {
+            let mut or: BoxRef<i32> = Box::new(42).into();
+            let ret = or.replace(typed_closure!(
+                (for<'_mut, 'shared> FnOnce(MutToShared<'_mut, 'shared, Box<i32>>) -> (&'shared i32, &'shared i32)),
+                |mut mts| {
+                    *mts = Box::new(1000);
+                    let ret = &*mts.into_shared();
+                    (ret, ret)
+                }));
+            assert_eq!(*ret, 1000);
+            assert_eq!(*or, 1000);
+        }
+        #[cfg(never)]
+        #[test]
+        fn replace_bad() {
+            let mut or: BoxRef<i32> = Box::new(42).into();
+            let dummy = 50;
+            let () = or.replace(typed_closure!(
+                (for<'_mut, 'shared> FnOnce(MutToShared<'_mut, 'shared, Box<i32>>) -> (&'shared i32, ())),
+                |_mts| {
+                    (&dummy, ()) // borrowed value does not live long enough
+                }));
+            assert_eq!(*or, 1000);
         }
     }
 }
