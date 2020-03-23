@@ -1,6 +1,5 @@
 //#![warn(missing_docs)]
 #![allow(unused_parens, unused_imports)]
-#![feature(unboxed_closures, associated_type_bounds)]
 
 /*!
 # An owning reference.
@@ -547,10 +546,10 @@ impl<O, T: ?Sized> OwningRef<O, T> where O: StableAddress {
 
     #[inline]
     pub fn modify_with_owner<'z, F>(&'z mut self, f: F)
-        -> <F as FnOnce<(&'z O, &'z mut &'z T)>>::Output
-        where for<'a, 'b> F: FnOnce<(&'a O, &'b mut &'a T)>
+        -> <F as ModifyWithOwnerFn<'z, O, T>>::ROutput
+        where for<'a> F: ModifyWithOwnerFn<'a, O, T>
     {
-        f(
+        f.modify_with_owner_fn_call(
             &*self.owner,
             unsafe { &mut *(&mut self.reference as *mut _ as *mut _) }
         )
@@ -592,28 +591,26 @@ impl<'shared, O: ?Sized + 'shared, T: ?Sized + 'shared, F, R> ReplaceFn<'shared,
           R: 'shared
 {
     type ROutput = R;
+    #[inline(always)]
     fn replace_fn_call<'_mut>(self, mts: MutToShared<'_mut, 'shared, O>) -> (&'shared T, Self::ROutput) {
         self(mts)
     }
 }
-/*
-impl<'_mut, 'shared: '_mut, O: ?Sized + 'shared, T: ?Sized + 'shared, F> ReplaceFn<'_mut, 'shared, O, T> for F
-    where F: FnOnce<(MutToShared<'_mut, 'shared, O>,)>,
-{
-    type ROutput = ();
-    fn replace_fn_call(self, mts: MutToShared<'_mut, 'shared, O>) -> (&'shared T, Self::ROutput) {
-        panic!()
+
+pub trait ModifyWithOwnerFn<'a, O: ?Sized + 'a, T: ?Sized + 'a> {
+    type ROutput;
+    fn modify_with_owner_fn_call<'b>(self, owner: &'a O, reference: &'b mut &'a T) -> Self::ROutput;
+}
+impl<'a, O: ?Sized + 'a, T: ?Sized + 'a, R, F> ModifyWithOwnerFn<'a, O, T> for F
+    where F: for<'b> FnOnce(&'a O, &'b mut &'a T) -> R {
+    type ROutput = R;
+    #[inline(always)]
+    fn modify_with_owner_fn_call<'b>(self, owner: &'a O, reference: &'b mut &'a T) -> Self::ROutput {
+        self(owner, reference)
     }
 }
-*/
 
-/*
-fn huh(f: impl for<'_mut, 'shared> FnOnce(MutToShared<'_mut, 'shared, Box<i32>>) -> (&'shared i32, &'shared i32))
-    -> impl for<'_mut, 'shared> ReplaceFn<'_mut, 'shared, Box<i32>, &'shared i32> {
-    f
-}
 
-*/
 impl<O, T: ?Sized> OwningRefMut<O, T> where O: StableAddress {
     /// Creates a new owning reference from a owner
     /// initialized to the direct dereference of it.
