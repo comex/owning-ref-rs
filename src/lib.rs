@@ -545,6 +545,23 @@ impl<O, T: ?Sized> OwningRef<O, T> where O: StableAddress {
     }
 
     #[inline]
+    pub fn modify<'z, F>(&'z mut self, f: F)
+        -> <F as ModifyFn<'z, T>>::ROutput
+        where for<'a> F: ModifyFn<'a, T>
+    {
+        f.modify_fn_call(
+            unsafe { &mut *(&mut self.reference as *mut _ as *mut _) }
+        )
+    }
+    #[inline]
+    pub fn modify_noret<'z, F>(&'z mut self, f: F)
+        where for<'_mut, 'shared> F: FnOnce(&'_mut mut &'shared T)
+    {
+        f(
+            unsafe { &mut *(&mut self.reference as *mut _ as *mut _) }
+        )
+    }
+    #[inline]
     pub fn modify_with_owner<'z, F>(&'z mut self, f: F)
         -> <F as ModifyWithOwnerFn<'z, O, T>>::ROutput
         where for<'a> F: ModifyWithOwnerFn<'a, O, T>
@@ -582,11 +599,11 @@ impl<O, T: ?Sized> OwningRef<O, T> where O: StableAddress {
     }
 }
 
-pub trait ReplaceFn<'shared, O: ?Sized + 'shared, T: ?Sized + 'shared> {
+pub trait ReplaceFn<'shared, O: ?Sized, T: ?Sized + 'shared> {
     type ROutput;
     fn replace_fn_call<'_mut>(self, mts: MutToShared<'_mut, 'shared, O>) -> (&'shared T, Self::ROutput);
 }
-impl<'shared, O: ?Sized + 'shared, T: ?Sized + 'shared, F, R> ReplaceFn<'shared, O, T> for F
+impl<'shared, O: ?Sized, T: ?Sized + 'shared, F, R> ReplaceFn<'shared, O, T> for F
     where F: for<'_mut> FnOnce(MutToShared<'_mut, 'shared, O>) -> (&'shared T, R),
           R: 'shared
 {
@@ -597,19 +614,31 @@ impl<'shared, O: ?Sized + 'shared, T: ?Sized + 'shared, F, R> ReplaceFn<'shared,
     }
 }
 
-pub trait ModifyWithOwnerFn<'a, O: ?Sized + 'a, T: ?Sized + 'a> {
+pub trait ModifyWithOwnerFn<'shared, O: ?Sized + 'shared, T: ?Sized + 'shared> {
     type ROutput;
-    fn modify_with_owner_fn_call<'b>(self, owner: &'a O, reference: &'b mut &'a T) -> Self::ROutput;
+    fn modify_with_owner_fn_call<'_mut>(self, owner: &'shared O, reference: &'_mut mut &'shared T) -> Self::ROutput;
 }
-impl<'a, O: ?Sized + 'a, T: ?Sized + 'a, R, F> ModifyWithOwnerFn<'a, O, T> for F
-    where F: for<'b> FnOnce(&'a O, &'b mut &'a T) -> R {
+impl<'shared, O: ?Sized + 'shared, T: ?Sized + 'shared, R, F> ModifyWithOwnerFn<'shared, O, T> for F
+    where F: for<'_mut> FnOnce(&'shared O, &'_mut mut &'shared T) -> R {
     type ROutput = R;
     #[inline(always)]
-    fn modify_with_owner_fn_call<'b>(self, owner: &'a O, reference: &'b mut &'a T) -> Self::ROutput {
+    fn modify_with_owner_fn_call<'_mut>(self, owner: &'shared O, reference: &'_mut mut &'shared T) -> Self::ROutput {
         self(owner, reference)
     }
 }
 
+pub trait ModifyFn<'shared, T: ?Sized + 'shared> {
+    type ROutput;
+    fn modify_fn_call<'_mut>(self, reference: &'_mut mut &'shared T) -> Self::ROutput;
+}
+impl<'shared, T: ?Sized + 'shared, R, F> ModifyFn<'shared, T> for F
+    where F: for<'_mut> FnOnce(&'_mut mut &'shared T) -> R {
+    type ROutput = R;
+    #[inline(always)]
+    fn modify_fn_call<'_mut>(self, reference: &'_mut mut &'shared T) -> Self::ROutput {
+        self(reference)
+    }
+}
 
 impl<O, T: ?Sized> OwningRefMut<O, T> where O: StableAddress {
     /// Creates a new owning reference from a owner
